@@ -1,0 +1,150 @@
+# ──────────────────────────────────────────────────────────────
+# test_config.yaml
+# Torque-Velocity Characterization — Test Configuration
+# ──────────────────────────────────────────────────────────────
+
+test:
+  name: torque_velocity_characterization
+  description: >
+    Ramp motor Q-axis current under constant PSU voltage until
+    target torque is reached, hold current, then decrease PSU
+    voltage to characterize the torque-speed relationship.
+
+# ──────────────────────────────────────────────────────────────
+# State Machine Phases
+# ──────────────────────────────────────────────────────────────
+# The state machine is driven by data timestamps, not wall clock.
+
+  phases:
+    - name: SETUP
+      description: "Initialize data sources, validate files"
+
+    - name: CURRENT_RAMP
+      description: "Ramp Q-axis current until torque or current limit"
+      parameters:
+        max_current_a: 34.0
+        ramp_duration_s: 10.0
+        # Derived: ramp_rate = max_current / ramp_duration = 3.4 A/s
+        target_torque_nm: 150.0
+
+    - name: TORQUE_HOLD
+      description: "Hold current constant at ramp endpoint"
+      parameters:
+        hold_duration_s: 10.0
+
+    - name: VOLTAGE_DECREASE
+      description: "Decrease PSU voltage while holding motor current"
+      parameters:
+        voltage_decrease_rate_v_per_s: 1.0
+        min_voltage_v: 0.0
+
+    - name: COMPLETE
+      description: "Flush buffers, write output log, report summary"
+
+# ──────────────────────────────────────────────────────────────
+# Safety Thresholds
+# ──────────────────────────────────────────────────────────────
+
+  safety:
+    max_torque_nm: 200.0
+    max_current_a: 34.0
+
+# ──────────────────────────────────────────────────────────────
+# Power Supply
+# ──────────────────────────────────────────────────────────────
+
+power_supply:
+  initial_voltage_v: 24.0
+  initial_current_limit_a: 2.7
+  protocol: scpi
+  commands:
+    set_voltage: "VOLT {value:.1f}"
+    set_current_limit: "CURR {value:.3f}"
+    output_on: "OUTP ON"
+    output_off: "OUTP OFF"
+    query_voltage: "MEAS:VOLT?"
+    query_current: "MEAS:CURR?"
+    identity: "*IDN?"
+
+# ──────────────────────────────────────────────────────────────
+# Data Sources
+# ──────────────────────────────────────────────────────────────
+
+data_sources:
+  motor:
+    description: "BLDC motor controller telemetry"
+    formats:
+      binary:
+        file_extension: ".bin"
+        protocol_definition: "motor_protocol.yaml"
+        nominal_rate_hz: 1000
+      csv:
+        file_extension: ".csv"
+        columns:
+          - { name: timestamp_s,        type: float64 }
+          - { name: velocity_rad_s,     type: float64 }
+          - { name: measured_current_a, type: float64 }
+        nominal_rate_hz: 1000
+
+  sensor:
+    description: "FUTEK torque sensor"
+    formats:
+      csv:
+        file_extension: ".csv"
+        columns:
+          - { name: timestamp_s, type: float64 }
+          - { name: torque_nm,   type: float64 }
+        nominal_rate_hz: 4800
+
+  power_supply:
+    description: "TDK Z+ PSU measurement log"
+    formats:
+      csv:
+        file_extension: ".csv"
+        columns:
+          - { name: timestamp_s, type: float64 }
+          - { name: voltage_v,   type: float64 }
+          - { name: current_a,   type: float64 }
+        nominal_rate_hz: 10
+
+# ──────────────────────────────────────────────────────────────
+# Synchronization
+# ──────────────────────────────────────────────────────────────
+
+synchronization:
+  primary_clock: motor
+  method: nearest_prior
+  description: >
+    For each motor sample, find the most recent sensor and PSU
+    samples with timestamps <= the motor timestamp.
+    Note: sensor timestamps have real-world jitter and are NOT
+    perfectly periodic.
+
+# ──────────────────────────────────────────────────────────────
+# Output Log
+# ──────────────────────────────────────────────────────────────
+
+output:
+  format: csv
+  columns:
+    - timestamp_s
+    - velocity_rad_s
+    - motor_current_a
+    - torque_nm
+    - psu_voltage_v
+    - psu_current_a
+    - commanded_current_a
+    - commanded_voltage_v
+    - test_phase
+
+  efficiency:
+    formula: "(torque_nm * velocity_rad_s) / (psu_voltage_v * psu_current_a)"
+    note: "Handle division by zero when PSU is off or current is zero"
+
+# ──────────────────────────────────────────────────────────────
+# Monitoring
+# ──────────────────────────────────────────────────────────────
+
+monitoring:
+  state_machine_rate_hz: 20
+  gui_update_rate_hz: 20

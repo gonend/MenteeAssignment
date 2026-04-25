@@ -1,0 +1,148 @@
+# ──────────────────────────────────────────────────────────────
+# motor_protocol.yaml
+# BLDC Motor Controller — Binary Protocol Definition
+# ──────────────────────────────────────────────────────────────
+# This file fully defines the binary packet structure used by
+# the motor controller. Your parser must read this file and
+# build its unpacking logic from these definitions.
+# ──────────────────────────────────────────────────────────────
+
+protocol:
+  name: bldc_motor_telemetry
+  version: "1.0"
+  byte_order: little_endian
+
+# ──────────────────────────────────────────────────────────────
+# Packet Framing
+# ──────────────────────────────────────────────────────────────
+# Every packet follows this structure:
+#   [start_marker][header][payload][checksum][end_marker]
+
+framing:
+  start_marker:
+    bytes: [0xAA, 0x55]
+    offset: 0
+    size: 2
+
+  header:
+    fields:
+      - name: module_type
+        type: uint8
+        offset: 2
+        size: 1
+        description: "Module identifier: 0x42 ('B') = BLDC motor"
+
+      - name: payload_size
+        type: uint8
+        offset: 3
+        size: 1
+        description: "Number of payload bytes (N)"
+
+      - name: timestamp_ms
+        type: uint32
+        offset: 4
+        size: 4
+        description: "Timestamp in milliseconds since boot"
+
+  payload:
+    offset: 8
+    size: N
+    description: >
+      First byte is the response/command code.
+      Remaining bytes are field data defined in the responses section.
+
+  checksum:
+    type: xor
+    offset: "8 + N"
+    size: 1
+    computed_over: "bytes[0] through bytes[8 + N - 1] inclusive"
+
+  end_marker:
+    bytes: [0x55, 0xAA]
+    offset: "9 + N"
+    size: 2
+
+  total_packet_size: "11 + N"
+
+# ──────────────────────────────────────────────────────────────
+# Type Definitions
+# ──────────────────────────────────────────────────────────────
+
+types:
+  uint8:   { size: 1, signed: false, format: "B" }
+  uint16:  { size: 2, signed: false, format: "<H" }
+  uint32:  { size: 4, signed: false, format: "<I" }
+  int32:   { size: 4, signed: true,  format: "<i" }
+  float32: { size: 4, signed: true,  format: "<f" }
+
+# ──────────────────────────────────────────────────────────────
+# Response Definitions (Motor → Host)
+# ──────────────────────────────────────────────────────────────
+# First payload byte = response code, then fields packed contiguously.
+
+responses:
+  - code: 0x0E
+    name: telemetry
+    description: "Continuous motor state telemetry"
+    payload_size: 9
+    fields:
+      - name: velocity
+        type: float32
+        unit: "rad/s"
+        description: "Rotor angular velocity"
+
+      - name: measured_current
+        type: float32
+        unit: "A"
+        description: "Measured Q-axis phase current"
+
+# ──────────────────────────────────────────────────────────────
+# Command Definitions (Host → Motor)
+# ──────────────────────────────────────────────────────────────
+# In file-replay mode, commands are not sent. The state machine
+# tracks what WOULD be sent and logs it.
+
+commands:
+  - code: 0x08
+    name: set_fsm_state
+    description: "Transition motor state machine"
+    fields:
+      - name: motor_id
+        type: uint8
+        description: "Target motor (0-indexed)"
+      - name: state
+        type: uint8
+        description: "Target state"
+    enum:
+      states:
+        IDLE:    0x00
+        ARMED:   0x03
+        TEST:    0x0B
+        ABORT:   0x09
+
+  - code: 0x06
+    name: set_current
+    description: "Set Q-axis target current"
+    fields:
+      - name: motor_id
+        type: uint8
+      - name: current_index
+        type: uint8
+        description: "Axis selector — always 1 for Q-axis"
+      - name: current
+        type: float32
+        unit: "A"
+
+  - code: 0x0E
+    name: monitor_enable
+    description: "Enable/disable continuous telemetry streaming"
+    fields:
+      - name: motor_mask
+        type: uint8
+        description: "Bitmask of motors to monitor"
+      - name: update_rate
+        type: uint16
+        description: "Decimation factor from base rate (250 → 1000 Hz)"
+      - name: binary_flag
+        type: uint8
+        description: "1 = binary logging mode"
