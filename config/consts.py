@@ -26,3 +26,13 @@ _BYTE_ORDER_PREFIX: Dict[str, str] = {
     "big_endian":    ">",
     "network":       "!",
 }
+
+_ZERO_STATS: Dict[str, int] = {
+    "motor_samples_total": 0,
+    "motor_samples_without_sensor_prior": 0,
+    "motor_samples_without_psu_prior": 0,
+    "sensor_samples_consumed": 0,
+    "psu_samples_consumed": 0,
+    "sensor_samples_after_motor_end": 0,
+    "psu_samples_after_motor_end": 0,
+}
