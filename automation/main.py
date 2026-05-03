@@ -186,6 +186,8 @@ def run_pipeline(
             "motor_stats": motor_driver.stats,
             "sensor_stats": sensor_driver.stats,
             "psu_stats": psu_driver.stats,
+            "efficiency_mean": log.efficiency_mean,
+            "efficiency_peak": log.efficiency_peak,
         }
         try:
             status_queue.put_nowait(sentinel)

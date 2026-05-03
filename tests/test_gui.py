@@ -63,8 +63,12 @@ def app(root_app):
     # Summary vars
     for var in (
         root_app._sum_motor_packets_var, root_app._sum_motor_errors_var,
+        root_app._sum_motor_dropped_var,
         root_app._sum_sensor_rows_var, root_app._sum_sensor_malformed_var,
+        root_app._sum_sensor_dropped_var,
         root_app._sum_psu_rows_var, root_app._sum_psu_malformed_var,
+        root_app._sum_psu_dropped_var,
+        root_app._sum_efficiency_var,
         root_app._sum_phase_dur_var, root_app._sum_peak_torque_var,
         root_app._sum_peak_current_var, root_app._sum_output_var,
     ):
@@ -427,10 +431,12 @@ def _full_sentinel(output_path: str = "") -> dict:
         },
         "motor_stats": {
             "total_packets": 1000, "checksum_errors": 3,
-            "truncations": 0, "unknown_codes": 0,
+            "truncations": 1, "unknown_codes": 2,
         },
-        "sensor_stats": {"total_rows": 4800, "malformed_rows": 2, "timestamp_gaps": 0},
+        "sensor_stats": {"total_rows": 4800, "malformed_rows": 2, "timestamp_gaps": 5},
         "psu_stats": {"total_rows": 50, "malformed_rows": 0, "timestamp_gaps": 1},
+        "efficiency_mean": 0.8765,
+        "efficiency_peak": 0.9321,
     }
 
 
@@ -524,3 +530,47 @@ class TestRunSummary:
         q.put_nowait(sentinel)
         app._poll()
         assert app._sum_phase_dur_var.get() == "—"
+
+    def test_motor_binary_dropped_sum(self, app):
+        q = _attach_queue(app)
+        q.put_nowait(_full_sentinel())
+        app._poll()
+        # checksum_errors=3 + truncations=1 + unknown_codes=2 = 6
+        assert app._sum_motor_dropped_var.get() == "6"
+
+    def test_sensor_timestamp_gaps(self, app):
+        q = _attach_queue(app)
+        q.put_nowait(_full_sentinel())
+        app._poll()
+        assert app._sum_sensor_dropped_var.get() == "5"
+
+    def test_psu_timestamp_gaps(self, app):
+        q = _attach_queue(app)
+        q.put_nowait(_full_sentinel())
+        app._poll()
+        assert app._sum_psu_dropped_var.get() == "1"
+
+    def test_efficiency_mean_and_peak_formatted(self, app):
+        q = _attach_queue(app)
+        q.put_nowait(_full_sentinel())
+        app._poll()
+        val = app._sum_efficiency_var.get()
+        assert "0.8765" in val
+        assert "0.9321" in val
+
+    def test_efficiency_none_shows_dash(self, app):
+        sentinel = _full_sentinel()
+        sentinel["efficiency_mean"] = None
+        sentinel["efficiency_peak"] = None
+        q = _attach_queue(app)
+        q.put_nowait(sentinel)
+        app._poll()
+        assert app._sum_efficiency_var.get() == "—"
+
+    def test_motor_csv_dropped_uses_malformed(self, app):
+        sentinel = _full_sentinel()
+        sentinel["motor_stats"] = {"total_rows": 1000, "malformed_rows": 7, "timestamp_gaps": 0}
+        q = _attach_queue(app)
+        q.put_nowait(sentinel)
+        app._poll()
+        assert app._sum_motor_dropped_var.get() == "7"

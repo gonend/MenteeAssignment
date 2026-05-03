@@ -60,6 +60,11 @@ class Logger:
         self._writer.writeheader()
         self._rows_written = 0
 
+        # Efficiency accumulators — three floats, O(1) memory
+        self._eff_sum: float = 0.0
+        self._eff_count: int = 0
+        self._eff_peak: Optional[float] = None
+
         logger.info("Logger ready | columns=%s", self._columns)
 
     def write(self, row: Dict[str, Any]) -> None:
@@ -82,6 +87,12 @@ class Logger:
                     "Efficiency undefined at t=%s (div-by-zero or None input)",
                     translated.get("timestamp_s"),
                 )
+            eff_val = translated.get(self._eff_col)
+            if eff_val is not None:
+                self._eff_sum += eff_val
+                self._eff_count += 1
+                if self._eff_peak is None or eff_val > self._eff_peak:
+                    self._eff_peak = eff_val
 
         # Step 3: None → '' prevents the literal string "None" from appearing in CSV.
         sanitized = {k: ("" if v is None else v) for k, v in translated.items()}
@@ -98,3 +109,11 @@ class Logger:
     @property
     def rows_written(self) -> int:
         return self._rows_written
+
+    @property
+    def efficiency_mean(self) -> Optional[float]:
+        return self._eff_sum / self._eff_count if self._eff_count else None
+
+    @property
+    def efficiency_peak(self) -> Optional[float]:
+        return self._eff_peak

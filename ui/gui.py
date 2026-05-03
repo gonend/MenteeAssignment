@@ -82,21 +82,27 @@ class MonitoringApp(tk.Tk):
         self._sum_peak_torque_var = tk.StringVar(value="—")
         self._sum_peak_current_var = tk.StringVar(value="—")
         self._sum_output_var = tk.StringVar(value="—")
+        self._sum_efficiency_var    = tk.StringVar(value="—")
+        self._sum_motor_dropped_var = tk.StringVar(value="—")
+        self._sum_sensor_dropped_var = tk.StringVar(value="—")
+        self._sum_psu_dropped_var   = tk.StringVar(value="—")
 
         # Plot deques — O(1) memory, 200-sample rolling window
-        self._dq_t:       collections.deque = collections.deque(maxlen=200)
-        self._dq_motor_i: collections.deque = collections.deque(maxlen=200)
-        self._dq_cmd_i:   collections.deque = collections.deque(maxlen=200)
-        self._dq_torque:  collections.deque = collections.deque(maxlen=200)
-        self._dq_psu_v:   collections.deque = collections.deque(maxlen=200)
+        self._dq_t:        collections.deque = collections.deque(maxlen=200)
+        self._dq_motor_i:  collections.deque = collections.deque(maxlen=200)
+        self._dq_cmd_i:    collections.deque = collections.deque(maxlen=200)
+        self._dq_torque:   collections.deque = collections.deque(maxlen=200)
+        self._dq_psu_v:    collections.deque = collections.deque(maxlen=200)
+        self._dq_velocity: collections.deque = collections.deque(maxlen=200)
 
         # Plot widget refs — populated by _build_ui()
         self._canvas: Optional[FigureCanvasTkAgg] = None
-        self._line_motor_i = None
-        self._line_cmd_i   = None
-        self._line_torque  = None
-        self._line_psu_v   = None
-        self._phase_text   = None
+        self._line_motor_i  = None
+        self._line_cmd_i    = None
+        self._line_torque   = None
+        self._line_psu_v    = None
+        self._line_velocity = None
+        self._phase_text    = None
         self._plot_axes: List = []
 
         self._build_ui()
@@ -248,16 +254,20 @@ class MonitoringApp(tk.Tk):
         summ.grid(row=3, column=0, sticky="ew", padx=8, pady=4)
 
         summ_rows = [
-            ("Motor packets/rows:",  self._sum_motor_packets_var),
-            ("Motor errors:",        self._sum_motor_errors_var),
-            ("Sensor rows:",         self._sum_sensor_rows_var),
-            ("Sensor malformed:",    self._sum_sensor_malformed_var),
-            ("PSU rows:",            self._sum_psu_rows_var),
-            ("PSU malformed:",       self._sum_psu_malformed_var),
-            ("Phase durations:",     self._sum_phase_dur_var),
-            ("Peak torque (Nm):",    self._sum_peak_torque_var),
-            ("Peak current (A):",    self._sum_peak_current_var),
-            ("Output file:",         self._sum_output_var),
+            ("Motor packets/rows:",           self._sum_motor_packets_var),
+            ("Motor errors:",                 self._sum_motor_errors_var),
+            ("Motor dropped (chk/trunc/unk):", self._sum_motor_dropped_var),
+            ("Sensor rows:",                  self._sum_sensor_rows_var),
+            ("Sensor malformed:",             self._sum_sensor_malformed_var),
+            ("Sensor timestamp gaps:",        self._sum_sensor_dropped_var),
+            ("PSU rows:",                     self._sum_psu_rows_var),
+            ("PSU malformed:",                self._sum_psu_malformed_var),
+            ("PSU timestamp gaps:",           self._sum_psu_dropped_var),
+            ("Efficiency mean / peak:",       self._sum_efficiency_var),
+            ("Phase durations:",              self._sum_phase_dur_var),
+            ("Peak torque (Nm):",             self._sum_peak_torque_var),
+            ("Peak current (A):",             self._sum_peak_current_var),
+            ("Output file:",                  self._sum_output_var),
         ]
         for r, (lbl, var) in enumerate(summ_rows):
             ttk.Label(summ, text=lbl, anchor="e", width=20).grid(row=r, column=0, sticky="e")
@@ -269,12 +279,13 @@ class MonitoringApp(tk.Tk):
         plot_frm = ttk.LabelFrame(inner, text="Live Telemetry", padding=4)
         plot_frm.grid(row=4, column=0, sticky="nsew", padx=8, pady=4)
 
-        fig = Figure(figsize=(8, 4), dpi=90)
+        fig = Figure(figsize=(8, 5.5), dpi=90)
         fig.set_layout_engine("tight")
 
-        ax0 = fig.add_subplot(3, 1, 1)
-        ax1 = fig.add_subplot(3, 1, 2)
-        ax2 = fig.add_subplot(3, 1, 3)
+        ax0 = fig.add_subplot(4, 1, 1)
+        ax1 = fig.add_subplot(4, 1, 2)
+        ax2 = fig.add_subplot(4, 1, 3)
+        ax3 = fig.add_subplot(4, 1, 4)
 
         self._line_motor_i, = ax0.plot([], [], label="Meas I", color="steelblue", linewidth=1)
         self._line_cmd_i,   = ax0.plot([], [], label="Cmd I",  color="orange",
@@ -292,10 +303,14 @@ class MonitoringApp(tk.Tk):
 
         self._line_psu_v, = ax2.plot([], [], color="crimson", linewidth=1)
         ax2.set_ylabel("PSU V", fontsize=8)
-        ax2.set_xlabel("Time (s)", fontsize=8)
         ax2.tick_params(labelsize=7)
 
-        self._plot_axes = [ax0, ax1, ax2]
+        self._line_velocity, = ax3.plot([], [], color="purple", linewidth=1)
+        ax3.set_ylabel("Velocity (rad/s)", fontsize=8)
+        ax3.set_xlabel("Time (s)", fontsize=8)
+        ax3.tick_params(labelsize=7)
+
+        self._plot_axes = [ax0, ax1, ax2, ax3]
 
         self._canvas = FigureCanvasTkAgg(fig, master=plot_frm)
         self._canvas.get_tk_widget().pack(fill="both", expand=True)
@@ -465,13 +480,14 @@ class MonitoringApp(tk.Tk):
 
         # Clear plot deques and reset line data for fresh run
         for dq in (self._dq_t, self._dq_motor_i, self._dq_cmd_i,
-                   self._dq_torque, self._dq_psu_v):
+                   self._dq_torque, self._dq_psu_v, self._dq_velocity):
             dq.clear()
         if self._canvas is not None:
             self._line_motor_i.set_data([], [])
             self._line_cmd_i.set_data([], [])
             self._line_torque.set_data([], [])
             self._line_psu_v.set_data([], [])
+            self._line_velocity.set_data([], [])
             self._phase_text.set_text("")
             for ax in self._plot_axes:
                 ax.relim()
@@ -566,6 +582,7 @@ class MonitoringApp(tk.Tk):
             self._dq_cmd_i.append(cmd_i)
             self._dq_torque.append(torque)
             self._dq_psu_v.append(psu_v)
+            self._dq_velocity.append(snap.get("velocity_rad_s"))
 
     # ------------------------------------------------------------------
     # Live plot
@@ -606,15 +623,20 @@ class MonitoringApp(tk.Tk):
         ts, vs = _safe_pairs(t, list(self._dq_psu_v))
         if ts:
             self._line_psu_v.set_data(ts, vs)
+        psu_vs = vs
+
+        ts, vs = _safe_pairs(t, list(self._dq_velocity))
+        if ts:
+            self._line_velocity.set_data(ts, vs)
 
         for ax in self._plot_axes:
             ax.relim()
             ax.autoscale_view()
 
         # Flat PSU line (all values identical) → autoscale gives zero range → force padding
-        if vs:
-            min_val = min(vs)
-            max_val = max(vs)
+        if psu_vs:
+            min_val = min(psu_vs)
+            max_val = max(psu_vs)
             if max_val - min_val == 0:
                 self._plot_axes[2].set_ylim(min_val - 5, max_val + 5)
 
@@ -640,14 +662,32 @@ class MonitoringApp(tk.Tk):
         if "total_packets" in motor_stats:
             self._sum_motor_packets_var.set(str(motor_stats.get("total_packets", "—")))
             self._sum_motor_errors_var.set(str(motor_stats.get("checksum_errors", "—")))
+            motor_dropped = (
+                (motor_stats.get("checksum_errors") or 0)
+                + (motor_stats.get("truncations") or 0)
+                + (motor_stats.get("unknown_codes") or 0)
+            )
+            self._sum_motor_dropped_var.set(str(motor_dropped))
         elif motor_stats:
             self._sum_motor_packets_var.set(str(motor_stats.get("total_rows", "—")))
             self._sum_motor_errors_var.set(str(motor_stats.get("malformed_rows", "—")))
+            self._sum_motor_dropped_var.set(str(motor_stats.get("malformed_rows", "—")))
 
         self._sum_sensor_rows_var.set(str(sensor_stats.get("total_rows", "—")))
         self._sum_sensor_malformed_var.set(str(sensor_stats.get("malformed_rows", "—")))
+        self._sum_sensor_dropped_var.set(str(sensor_stats.get("timestamp_gaps", "—")))
         self._sum_psu_rows_var.set(str(psu_stats.get("total_rows", "—")))
         self._sum_psu_malformed_var.set(str(psu_stats.get("malformed_rows", "—")))
+        self._sum_psu_dropped_var.set(str(psu_stats.get("timestamp_gaps", "—")))
+
+        eff_mean = sentinel.get("efficiency_mean")
+        eff_peak = sentinel.get("efficiency_peak")
+        if eff_mean is not None or eff_peak is not None:
+            mean_s = f"{eff_mean:.4f}" if eff_mean is not None else "—"
+            peak_s = f"{eff_peak:.4f}" if eff_peak is not None else "—"
+            self._sum_efficiency_var.set(f"{mean_s} / {peak_s}")
+        else:
+            self._sum_efficiency_var.set("—")
 
         phase_dur = stats.get("phase_durations_s") or {}
         dur_str = ", ".join(
