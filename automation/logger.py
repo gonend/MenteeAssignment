@@ -8,7 +8,7 @@ logger = logging.getLogger(__name__)
 
 # Structural adapter: maps internal driver row keys → YAML output column names.
 # Inclusion and order of columns remain strictly driven by yaml['output']['columns'].
-_FIELD_RENAME: Dict[str, str] = {
+FIELD_RENAME: Dict[str, str] = {
     "measured_current_a": "motor_current_a",
     "voltage_v":          "psu_voltage_v",
     "current_a":          "psu_current_a",
@@ -67,7 +67,7 @@ class Logger:
         # Step 1: rename internal driver keys to output column names.
         translated: Dict[str, Any] = {}
         for k, v in row.items():
-            translated[_FIELD_RENAME.get(k, k)] = v
+            translated[FIELD_RENAME.get(k, k)] = v
 
         # Step 2: compute efficiency (uses raw pre-sanitized values so None is detectable).
         if self._compiled_formula is not None and self._eff_col is not None:

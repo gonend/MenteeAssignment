@@ -17,7 +17,7 @@ from typing import Any, Dict, List
 
 import pytest
 
-from automation.logger import Logger, _FIELD_RENAME
+from automation.logger import Logger, FIELD_RENAME
 
 # ---------------------------------------------------------------------------
 # Shared fixtures
@@ -117,9 +117,9 @@ class TestLoggerInit:
 
 class TestFieldTranslation:
     def test_rename_map_contains_all_three_adapters(self):
-        assert _FIELD_RENAME["measured_current_a"] == "motor_current_a"
-        assert _FIELD_RENAME["voltage_v"] == "psu_voltage_v"
-        assert _FIELD_RENAME["current_a"] == "psu_current_a"
+        assert FIELD_RENAME["measured_current_a"] == "motor_current_a"
+        assert FIELD_RENAME["voltage_v"] == "psu_voltage_v"
+        assert FIELD_RENAME["current_a"] == "psu_current_a"
 
     def test_measured_current_renamed_in_output(self):
         buf = _buf()
