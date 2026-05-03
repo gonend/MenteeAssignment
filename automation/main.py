@@ -11,14 +11,17 @@ from __future__ import annotations
 
 import argparse
 import logging
+import queue
 import sys
+import threading
+import time
 from contextlib import ExitStack
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
 
 from config.consts import _UNIT_SUFFIX_MAP
 from config.loader import ConfigurationError, load_yaml_config
-from automation.logger import Logger
+from automation.logger import FIELD_RENAME, Logger
 from automation.row_schema import SchemaProjector
 from automation.state_machine import StateMachine
 from automation.synchronizer import Synchronizer
@@ -29,6 +32,17 @@ from drivers.sensor import SensorCSVReader
 _log = logging.getLogger(__name__)
 
 PROGRESS_EVERY = 10_000
+
+
+def _cfg_get(cfg: Dict[str, Any], *path: str) -> Any:
+    """Walk nested dicts; raise KeyError with full dotted path on miss."""
+    d = cfg
+    dotted = ".".join(path)
+    for k in path:
+        if not isinstance(d, dict) or k not in d:
+            raise KeyError(f"Missing required config key: {dotted}")
+        d = d[k]
+    return d
 
 
 # ---------------------------------------------------------------------------
@@ -76,6 +90,10 @@ def run_pipeline(
     args: argparse.Namespace,
     test_cfg: Dict[str, Any],
     motor_proto: Optional[Dict[str, Any]],
+    *,
+    status_queue: Optional[queue.Queue] = None,
+    abort_event: Optional[threading.Event] = None,
+    speed_multiplier: float = 0.0,
 ) -> None:
     """Instantiate components and run the row loop.  Owns no file handles directly
     — ExitStack manages the output file and Logger context manager."""
@@ -105,15 +123,49 @@ def run_pipeline(
         driver_label,
     )
 
+    gui_rate_hz = (test_cfg.get("monitoring") or {}).get("gui_update_rate_hz", 20)
+    snapshot_period_s = 1.0 / max(1, gui_rate_hz)
+
     with ExitStack() as stack:
         out_fh = stack.enter_context(open(args.output, "w", newline=""))
         log = stack.enter_context(Logger(test_cfg, out_fh))
 
         rows = 0
+        last_snap_wall = 0.0
+        first_motor_t: Optional[float] = None
+        wall_start = time.monotonic()
+
         for raw in projector:
+            if abort_event is not None and abort_event.is_set():
+                sm.request_abort("manual_abort_gui")
+
             augmented = sm.process(raw)
             log.write(augmented)
             rows += 1
+
+            # Speed pacing — real-time throttle; skip when speed_multiplier == 0.0 (Max).
+            if speed_multiplier and speed_multiplier > 0.0:
+                t_data = augmented.get("timestamp_s")
+                if t_data is not None:
+                    if first_motor_t is None:
+                        first_motor_t = t_data
+                    target_wall = (t_data - first_motor_t) / speed_multiplier
+                    slack = target_wall - (time.monotonic() - wall_start)
+                    if slack > 0.0:
+                        time.sleep(slack)
+
+            # Throttled snapshot — at most gui_update_rate_hz sends per second.
+            if status_queue is not None:
+                now = time.monotonic()
+                if now - last_snap_wall >= snapshot_period_s:
+                    last_snap_wall = now
+                    snap = {FIELD_RENAME.get(k, k): v for k, v in augmented.items()}
+                    snap["rows"] = rows
+                    snap["abort_reason"] = sm.get_stats().get("abort_reason")
+                    try:
+                        status_queue.put_nowait(snap)
+                    except queue.Full:
+                        pass  # bounded queue; drop oldest implicitly via GUI drain
 
             if rows % PROGRESS_EVERY == 0:
                 _log.info(
@@ -125,6 +177,25 @@ def run_pipeline(
 
             if sm.is_complete:
                 break
+
+    if status_queue is not None:
+        sentinel: Dict[str, Any] = {
+            "_done": True,
+            "rows": log.rows_written,
+            "stats": sm.get_stats(),
+            "motor_stats": motor_driver.stats,
+            "sensor_stats": sensor_driver.stats,
+            "psu_stats": psu_driver.stats,
+        }
+        try:
+            status_queue.put_nowait(sentinel)
+        except queue.Full:
+            # Sentinel must reach the GUI — drain one stale snap and retry.
+            try:
+                status_queue.get_nowait()
+                status_queue.put_nowait(sentinel)
+            except (queue.Empty, queue.Full):
+                pass
 
     sm_stats = sm.get_stats()
     sync_stats = synchronizer.get_stats()
