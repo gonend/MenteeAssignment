@@ -573,3 +573,40 @@ class TestStateMachineStats:
         for i in range(7):
             sm.process(_row(0.001 + i * 0.001))
         assert sm.get_stats()["rows_processed"] == 7
+
+
+# ---------------------------------------------------------------------------
+# 12. Peak torque / peak current tracking
+# ---------------------------------------------------------------------------
+
+
+class TestStateMachinePeakTracking:
+    def test_peaks_initialised_to_zero(self):
+        stats = _make_sm().get_stats()
+        assert stats["peak_torque_nm"] == 0.0
+        assert stats["peak_current_a"] == 0.0
+
+    def test_peak_torque_uses_absolute_value(self):
+        sm = _make_sm()
+        sm.process(_row(0.001, torque=-150.0))
+        sm.process(_row(0.002, torque=100.0))
+        assert sm.get_stats()["peak_torque_nm"] == pytest.approx(150.0)
+
+    def test_peak_current_uses_absolute_value(self):
+        sm = _make_sm()
+        sm.process(_row(0.001, current=-12.5))
+        sm.process(_row(0.002, current=8.0))
+        assert sm.get_stats()["peak_current_a"] == pytest.approx(12.5)
+
+    def test_peak_torque_ignores_none_rows(self):
+        sm = _make_sm()
+        sm.process(_row(0.001))  # no torque key
+        sm.process(_row(0.002, torque=42.0))
+        sm.process(_row(0.003))
+        assert sm.get_stats()["peak_torque_nm"] == pytest.approx(42.0)
+
+    def test_peak_torque_monotonic_max(self):
+        sm = _make_sm()
+        for t, val in zip([0.001, 0.002, 0.003], [10.0, 50.0, 30.0]):
+            sm.process(_row(t, torque=val))
+        assert sm.get_stats()["peak_torque_nm"] == pytest.approx(50.0)

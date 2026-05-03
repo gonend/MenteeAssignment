@@ -30,6 +30,9 @@ from matplotlib.figure import Figure
 
 from config.loader import ConfigurationError, load_yaml_config
 from automation.main import run_pipeline
+from drivers.motor import MotorBinaryReader, MotorCSVReader
+from drivers.psu import PSUCSVReader
+from drivers.sensor import SensorCSVReader
 
 _log = logging.getLogger(__name__)
 
@@ -86,6 +89,16 @@ class MonitoringApp(tk.Tk):
         self._sum_motor_dropped_var = tk.StringVar(value="—")
         self._sum_sensor_dropped_var = tk.StringVar(value="—")
         self._sum_psu_dropped_var   = tk.StringVar(value="—")
+        self._sum_throughput_var    = tk.StringVar(value="—")
+
+        # Pre-flight scan status — populated after Browse (PDF Connection Panel: row
+        # count, time span, parse errors detected during initial scan).
+        self._scan_motor_var  = tk.StringVar(value="")
+        self._scan_sensor_var = tk.StringVar(value="")
+        self._scan_psu_var    = tk.StringVar(value="")
+        # Generation counter per source — increments on every Browse so a slow scan
+        # whose user already re-browsed is silently dropped instead of overwriting.
+        self._scan_gen: Dict[str, int] = {"motor": 0, "sensor": 0, "psu": 0}
 
         # Plot deques — O(1) memory, 200-sample rolling window
         self._dq_t:        collections.deque = collections.deque(maxlen=200)
@@ -156,13 +169,14 @@ class MonitoringApp(tk.Tk):
         inp.grid(row=0, column=0, sticky="ew", padx=8, pady=4)
         inp.columnconfigure(1, weight=1)
 
+        # source_var = pre-flight scan status label var (None for config row).
         file_rows = [
-            ("Config YAML:",  self._config_path,  "config"),
-            ("Motor CSV/BIN:",   self._motor_path,   "motor"),
-            ("Sensor CSV:",   self._sensor_path,  "sensor"),
-            ("PSU CSV:",      self._psu_path,     "psu"),
+            ("Config YAML:",  self._config_path,  "config", None),
+            ("Motor CSV/BIN:",   self._motor_path,   "motor",  self._scan_motor_var),
+            ("Sensor CSV:",   self._sensor_path,  "sensor", self._scan_sensor_var),
+            ("PSU CSV:",      self._psu_path,     "psu",    self._scan_psu_var),
         ]
-        for r, (lbl, var, key) in enumerate(file_rows):
+        for r, (lbl, var, key, status_var) in enumerate(file_rows):
             ttk.Label(inp, text=lbl).grid(row=r, column=0, sticky="w")
             ttk.Entry(inp, textvariable=var, state="readonly", width=50).grid(
                 row=r, column=1, sticky="ew", padx=4
@@ -170,6 +184,10 @@ class MonitoringApp(tk.Tk):
             ttk.Button(
                 inp, text="Browse…", command=lambda k=key: self._on_browse(k)
             ).grid(row=r, column=2)
+            if status_var is not None:
+                ttk.Label(
+                    inp, textvariable=status_var, anchor="w", width=44, foreground="#444"
+                ).grid(row=r, column=3, sticky="w", padx=6)
 
         # Format selector
         r = len(file_rows)
@@ -181,7 +199,11 @@ class MonitoringApp(tk.Tk):
         self._fmt_combo.grid(row=r, column=1, sticky="w", padx=4)
         self._fmt_combo.bind(
             "<<ComboboxSelected>>",
-            lambda _: (self._update_protocol_state(), self._check_ready()),
+            lambda _: (
+                self._update_protocol_state(),
+                self._check_ready(),
+                self._refresh_scans(triggering_key="motor"),
+            ),
         )
 
         # Protocol YAML (enabled only when format=binary)
@@ -267,6 +289,7 @@ class MonitoringApp(tk.Tk):
             ("Phase durations:",              self._sum_phase_dur_var),
             ("Peak torque (Nm):",             self._sum_peak_torque_var),
             ("Peak current (A):",             self._sum_peak_current_var),
+            ("Throughput (rows/s):",          self._sum_throughput_var),
             ("Output file:",                  self._sum_output_var),
         ]
         for r, (lbl, var) in enumerate(summ_rows):
@@ -347,6 +370,7 @@ class MonitoringApp(tk.Tk):
                 self._motor_format.set("csv")
             self._update_protocol_state()
         self._check_ready()
+        self._refresh_scans(triggering_key=key)
 
     def _on_browse_output(self) -> None:
         path = filedialog.asksaveasfilename(
@@ -357,6 +381,141 @@ class MonitoringApp(tk.Tk):
         if path:
             self._output_path.set(path)
             self._check_ready()
+
+    # ------------------------------------------------------------------
+    # Pre-flight scan (PDF Connection Panel: row count, time span, errors)
+    # ------------------------------------------------------------------
+
+    def _refresh_scans(self, triggering_key: str) -> None:
+        """Kick scans for any sources whose path + required config are present.
+
+        - Motor scan needs config YAML (CSV) or motor protocol YAML (binary)
+        - Sensor / PSU scans need config YAML
+        - Re-scans on every Browse — generation counter discards stale results
+        """
+        # Motor — CSV needs test_cfg, binary needs motor_proto.
+        if triggering_key in ("motor", "config", "protocol"):
+            self._maybe_scan_motor()
+        if triggering_key in ("sensor", "config"):
+            self._maybe_scan_simple("sensor")
+        if triggering_key in ("psu", "config"):
+            self._maybe_scan_simple("psu")
+
+    def _maybe_scan_motor(self) -> None:
+        path = self._motor_path.get().strip()
+        if not path:
+            self._scan_motor_var.set("")
+            return
+        fmt = self._motor_format.get()
+        cfg_path = self._config_path.get().strip()
+        proto_path = self._protocol_path.get().strip()
+        if fmt == "binary":
+            if not proto_path:
+                self._scan_motor_var.set("Pending protocol YAML…")
+                return
+            self._scan_gen["motor"] += 1
+            gen = self._scan_gen["motor"]
+            self._scan_motor_var.set("Scanning…")
+            threading.Thread(
+                target=self._scan_motor_worker,
+                args=(path, "binary", proto_path, gen),
+                daemon=True, name="scan-motor",
+            ).start()
+        else:
+            if not cfg_path:
+                self._scan_motor_var.set("Pending config YAML…")
+                return
+            self._scan_gen["motor"] += 1
+            gen = self._scan_gen["motor"]
+            self._scan_motor_var.set("Scanning…")
+            threading.Thread(
+                target=self._scan_motor_worker,
+                args=(path, "csv", cfg_path, gen),
+                daemon=True, name="scan-motor",
+            ).start()
+
+    def _maybe_scan_simple(self, source: str) -> None:
+        """Sensor / PSU CSV pre-flight scan."""
+        var_path = self._sensor_path if source == "sensor" else self._psu_path
+        var_status = self._scan_sensor_var if source == "sensor" else self._scan_psu_var
+        path = var_path.get().strip()
+        if not path:
+            var_status.set("")
+            return
+        cfg_path = self._config_path.get().strip()
+        if not cfg_path:
+            var_status.set("Pending config YAML…")
+            return
+        self._scan_gen[source] += 1
+        gen = self._scan_gen[source]
+        var_status.set("Scanning…")
+        threading.Thread(
+            target=self._scan_simple_worker,
+            args=(source, path, cfg_path, gen),
+            daemon=True, name=f"scan-{source}",
+        ).start()
+
+    def _scan_motor_worker(
+        self, path: str, fmt: str, cfg_path: str, gen: int
+    ) -> None:
+        try:
+            cfg = load_yaml_config(cfg_path)
+            if fmt == "binary":
+                driver = MotorBinaryReader(path, cfg)
+            else:
+                driver = MotorCSVReader(path, cfg)
+            text = self._summarize_driver(driver, fmt)
+        except Exception as exc:
+            text = f"FAIL: {type(exc).__name__}: {exc}"
+        # Drop stale result if user re-browsed while we were scanning.
+        if self._scan_gen.get("motor") != gen:
+            return
+        self.after(0, lambda: self._scan_motor_var.set(text))
+
+    def _scan_simple_worker(
+        self, source: str, path: str, cfg_path: str, gen: int
+    ) -> None:
+        try:
+            cfg = load_yaml_config(cfg_path)
+            driver = SensorCSVReader(path, cfg) if source == "sensor" else PSUCSVReader(path, cfg)
+            text = self._summarize_driver(driver, "csv")
+        except Exception as exc:
+            text = f"FAIL: {type(exc).__name__}: {exc}"
+        if self._scan_gen.get(source) != gen:
+            return
+        var = self._scan_sensor_var if source == "sensor" else self._scan_psu_var
+        self.after(0, lambda: var.set(text))
+
+    @staticmethod
+    def _summarize_driver(driver: Any, fmt: str) -> str:
+        """Drain driver once; return 'N rows | T s | E errors' summary string."""
+        count = 0
+        first_t: Optional[float] = None
+        last_t: Optional[float] = None
+        for row in driver:
+            count += 1
+            t = row.get("timestamp_s")
+            if t is not None:
+                if first_t is None:
+                    first_t = t
+                last_t = t
+        stats = getattr(driver, "stats", {}) or {}
+        if fmt == "binary":
+            errors = (
+                int(stats.get("checksum_errors") or 0)
+                + int(stats.get("truncations") or 0)
+                + int(stats.get("unknown_codes") or 0)
+            )
+            unit = "packets"
+        else:
+            errors = int(stats.get("malformed_rows") or 0)
+            unit = "rows"
+        span = (
+            f"{(last_t - first_t):.2f} s"
+            if first_t is not None and last_t is not None
+            else "n/a"
+        )
+        return f"{count} {unit} | {span} | {errors} errors"
 
     def _check_ready(self) -> None:
         """Enable Start only when all required file paths are populated.
@@ -703,6 +862,14 @@ class MonitoringApp(tk.Tk):
         self._sum_peak_current_var.set(
             f"{peak_current:.2f}" if peak_current is not None else "—"
         )
+
+        throughput = sentinel.get("throughput_rows_per_s")
+        if throughput is not None:
+            elapsed = sentinel.get("processing_s")
+            elapsed_s = f"{elapsed:.2f}s" if isinstance(elapsed, (int, float)) else "—"
+            self._sum_throughput_var.set(f"{throughput:,.0f} rows/s ({elapsed_s})")
+        else:
+            self._sum_throughput_var.set("—")
 
         self._sum_output_var.set(self._output_path.get() or "—")
 

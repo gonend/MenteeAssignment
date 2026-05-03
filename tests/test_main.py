@@ -455,3 +455,67 @@ class TestPipelineFileContract:
         _run(_motor(3), _sensor(3), _psu(3), out)
         fieldnames, _ = _read_csv(out)
         assert len(fieldnames) == len(_EXPECTED_HEADER)
+
+
+# ---------------------------------------------------------------------------
+# 9. TestPipelineThroughput
+# ---------------------------------------------------------------------------
+
+class TestPipelineThroughput:
+    """PDF: 'Track and report parsing throughput.'  Sentinel exposes processing-time
+    throughput (sleeps excluded) so the number reflects parser work."""
+
+    def _drain_sentinel(self, q: "queue.Queue") -> Dict[str, Any]:
+        import queue as _q
+        while True:
+            try:
+                item = q.get_nowait()
+            except _q.Empty:
+                raise AssertionError("status_queue exhausted before sentinel")
+            if item.get("_done"):
+                return item
+
+    def test_sentinel_contains_throughput_keys(self, tmp_path):
+        import queue
+        out = str(tmp_path / "out.csv")
+        q: queue.Queue = queue.Queue(maxsize=64)
+        args = _args(out)
+        with patch("automation.main.MotorCSVReader",  return_value=FakeMotor(_motor(50))), \
+             patch("automation.main.SensorCSVReader", return_value=FakeSensor(_sensor(50))), \
+             patch("automation.main.PSUCSVReader",    return_value=FakePSU(_psu(3))):
+            run_pipeline(args, _CFG, None, status_queue=q)
+        sentinel = self._drain_sentinel(q)
+        assert "throughput_rows_per_s" in sentinel
+        assert "elapsed_wall_s" in sentinel
+        assert "processing_s" in sentinel
+
+    def test_throughput_positive_for_nonempty_run(self, tmp_path):
+        import queue
+        out = str(tmp_path / "out.csv")
+        q: queue.Queue = queue.Queue(maxsize=64)
+        args = _args(out)
+        with patch("automation.main.MotorCSVReader",  return_value=FakeMotor(_motor(50))), \
+             patch("automation.main.SensorCSVReader", return_value=FakeSensor(_sensor(50))), \
+             patch("automation.main.PSUCSVReader",    return_value=FakePSU(_psu(3))):
+            run_pipeline(args, _CFG, None, status_queue=q)
+        sentinel = self._drain_sentinel(q)
+        throughput = sentinel["throughput_rows_per_s"]
+        # Empty run could have processing_s == 0 → None; 50 rows must produce a number.
+        assert throughput is not None
+        assert throughput > 0.0
+
+    def test_max_speed_excludes_no_sleep_time(self, tmp_path):
+        """At Max (speed=0.0) processing_s == elapsed_wall_s within tolerance."""
+        import queue
+        out = str(tmp_path / "out.csv")
+        q: queue.Queue = queue.Queue(maxsize=64)
+        args = _args(out)
+        with patch("automation.main.MotorCSVReader",  return_value=FakeMotor(_motor(20))), \
+             patch("automation.main.SensorCSVReader", return_value=FakeSensor(_sensor(20))), \
+             patch("automation.main.PSUCSVReader",    return_value=FakePSU(_psu(3))):
+            run_pipeline(args, _CFG, None, status_queue=q, speed_multiplier=0.0)
+        sentinel = self._drain_sentinel(q)
+        # No pacing sleeps at speed=0 → wall ≈ processing.
+        assert sentinel["processing_s"] == pytest.approx(
+            sentinel["elapsed_wall_s"], abs=1e-3
+        )

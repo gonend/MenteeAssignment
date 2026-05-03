@@ -64,6 +64,8 @@ class StateMachine:
             "abort_reason": None,
             "end_phase": self._phase_name,
             "rows_processed": 0,
+            "peak_torque_nm": 0.0,
+            "peak_current_a": 0.0,
         }
 
         # Dispatch by phase name, never by YAML list index — reordering YAML is safe.
@@ -271,6 +273,14 @@ class StateMachine:
         """
         t: float = row["timestamp_s"]
         torque = row.get("torque_nm")
+
+        # Peak tracking — abs() because PDF safety logic is on |torque|/|current|.
+        # None-guarded; SchemaProjector emits None during bootstrap before sensor/motor align.
+        if torque is not None:
+            self._stats["peak_torque_nm"] = max(self._stats["peak_torque_nm"], abs(torque))
+        meas_i = row.get("measured_current_a")
+        if meas_i is not None:
+            self._stats["peak_current_a"] = max(self._stats["peak_current_a"], abs(meas_i))
 
         # Priority 1: manual abort (GUI thread sets the event; safe to poll here).
         if self._abort_event.is_set() and self._phase_name != "COMPLETE":

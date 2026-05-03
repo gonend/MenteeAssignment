@@ -133,7 +133,10 @@ def run_pipeline(
         rows = 0
         last_snap_wall = 0.0
         first_motor_t: Optional[float] = None
-        wall_start = time.monotonic()
+        wall_start = time.perf_counter()
+        # Track time spent in pacing sleeps so throughput reflects parsing work,
+        # not 1×-playback wall clock.  At Max (speed_multiplier=0.0) this stays 0.
+        total_sleep_s = 0.0
 
         for raw in projector:
             if abort_event is not None and abort_event.is_set():
@@ -150,13 +153,14 @@ def run_pipeline(
                     if first_motor_t is None:
                         first_motor_t = t_data
                     target_wall = (t_data - first_motor_t) / speed_multiplier
-                    slack = target_wall - (time.monotonic() - wall_start)
+                    slack = target_wall - (time.perf_counter() - wall_start)
                     if slack > 0.0:
                         time.sleep(slack)
+                        total_sleep_s += slack
 
             # Throttled snapshot — at most gui_update_rate_hz sends per second.
             if status_queue is not None:
-                now = time.monotonic()
+                now = time.perf_counter()
                 if now - last_snap_wall >= snapshot_period_s:
                     last_snap_wall = now
                     snap = {FIELD_RENAME.get(k, k): v for k, v in augmented.items()}
@@ -178,6 +182,12 @@ def run_pipeline(
             if sm.is_complete:
                 break
 
+    elapsed_wall_s = time.perf_counter() - wall_start
+    processing_s = max(elapsed_wall_s - total_sleep_s, 0.0)
+    throughput_rows_per_s: Optional[float] = (
+        rows / processing_s if processing_s > 0.0 else None
+    )
+
     if status_queue is not None:
         sentinel: Dict[str, Any] = {
             "_done": True,
@@ -188,6 +198,9 @@ def run_pipeline(
             "psu_stats": psu_driver.stats,
             "efficiency_mean": log.efficiency_mean,
             "efficiency_peak": log.efficiency_peak,
+            "elapsed_wall_s": elapsed_wall_s,
+            "processing_s": processing_s,
+            "throughput_rows_per_s": throughput_rows_per_s,
         }
         try:
             status_queue.put_nowait(sentinel)
@@ -208,6 +221,11 @@ def run_pipeline(
         sm_stats.get("end_phase"),
         sm_stats.get("abort_reason"),
     )
+    if throughput_rows_per_s is not None:
+        _log.info(
+            "Throughput   | %.0f rows/s (processing %.3f s, wall %.3f s)",
+            throughput_rows_per_s, processing_s, elapsed_wall_s,
+        )
     _log.info("Sync stats    | %s", sync_stats)
     _log.info("StateMachine  | %s", sm_stats)
     if motor_format == "binary":

@@ -1,40 +1,14 @@
-# Virtual environment
+# Environments
 .venv/
-venv/
 env/
+.env
 
-# Python bytecode
+# Python
 __pycache__/
 *.py[cod]
-*.pyd
-*.pyo
-
-# Pytest
+*$py.class
 .pytest_cache/
-.coverage
-htmlcov/
-*.xml
 
-# Distribution / packaging
-dist/
-build/
-*.egg-info/
-*.egg
-
-# Data files (captured motor/sensor data — large, generated)
-data/*.bin
-data/*.csv
-
-# OS / editor artifacts
-.DS_Store
-Thumbs.db
-desktop.ini
-*.swp
-*.swo
-.idea/
+# IDEs
 .vscode/
-
-# Markdown docs & assignment PDF
-*.md
-data/Tool_writer_home_assignment.pdf
-# config/Tool_writer_home_assignment.pdf
+.idea/

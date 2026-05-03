@@ -71,8 +71,11 @@ def app(root_app):
         root_app._sum_efficiency_var,
         root_app._sum_phase_dur_var, root_app._sum_peak_torque_var,
         root_app._sum_peak_current_var, root_app._sum_output_var,
+        root_app._sum_throughput_var,
     ):
         var.set("—")
+    for var in (root_app._scan_motor_var, root_app._scan_sensor_var, root_app._scan_psu_var):
+        var.set("")
     root_app._status_queue = None
     root_app._abort_event = None
     root_app._worker = None
@@ -574,3 +577,95 @@ class TestRunSummary:
         q.put_nowait(sentinel)
         app._poll()
         assert app._sum_motor_dropped_var.get() == "7"
+
+
+# ---------------------------------------------------------------------------
+# 6. Throughput summary
+# ---------------------------------------------------------------------------
+
+class TestRunSummaryThroughput:
+
+    def test_throughput_displayed(self, app):
+        sentinel = _full_sentinel()
+        sentinel["throughput_rows_per_s"] = 12345.6
+        sentinel["processing_s"] = 0.5
+        sentinel["elapsed_wall_s"] = 0.5
+        q = _attach_queue(app)
+        q.put_nowait(sentinel)
+        app._poll()
+        text = app._sum_throughput_var.get()
+        assert "rows/s" in text
+        assert "0.50s" in text
+
+    def test_throughput_none_shows_dash(self, app):
+        sentinel = _full_sentinel()
+        sentinel["throughput_rows_per_s"] = None
+        q = _attach_queue(app)
+        q.put_nowait(sentinel)
+        app._poll()
+        assert app._sum_throughput_var.get() == "—"
+
+
+# ---------------------------------------------------------------------------
+# 7. Pre-flight scan
+# ---------------------------------------------------------------------------
+
+class TestPreFlightScan:
+    """Static scan-summary logic + the pending-config branches.  Threaded paths
+    are exercised end-to-end at runtime; tests stay synchronous to avoid Tk +
+    threading flakiness."""
+
+    def test_summarize_driver_csv_reports_count_span_errors(self):
+        class _Drv:
+            stats = {"malformed_rows": 2}
+            def __iter__(self):
+                yield {"timestamp_s": 0.0}
+                yield {"timestamp_s": 1.5}
+                yield {"timestamp_s": 5.0}
+        text = MonitoringApp._summarize_driver(_Drv(), "csv")
+        assert "3 rows" in text
+        assert "5.00 s" in text
+        assert "2 errors" in text
+
+    def test_summarize_driver_binary_sums_all_error_types(self):
+        class _Drv:
+            stats = {"checksum_errors": 1, "truncations": 2, "unknown_codes": 3}
+            def __iter__(self):
+                yield {"timestamp_s": 0.0}
+                yield {"timestamp_s": 0.001}
+        text = MonitoringApp._summarize_driver(_Drv(), "binary")
+        assert "2 packets" in text
+        assert "6 errors" in text   # 1+2+3
+
+    def test_summarize_driver_missing_timestamp_marks_span_n_a(self):
+        class _Drv:
+            stats = {"malformed_rows": 0}
+            def __iter__(self):
+                yield {"foo": "bar"}
+        text = MonitoringApp._summarize_driver(_Drv(), "csv")
+        assert "n/a" in text
+
+    def test_maybe_scan_simple_pending_when_no_config(self, app):
+        app._sensor_path.set("/fake/sensor.csv")
+        app._config_path.set("")
+        app._maybe_scan_simple("sensor")
+        assert "Pending config" in app._scan_sensor_var.get()
+
+    def test_maybe_scan_simple_clears_label_on_empty_path(self, app):
+        app._sensor_path.set("")
+        app._scan_sensor_var.set("stale text")
+        app._maybe_scan_simple("sensor")
+        assert app._scan_sensor_var.get() == ""
+
+    def test_maybe_scan_motor_pending_protocol_for_binary(self, app):
+        app._motor_path.set("/fake/motor.bin")
+        app._motor_format.set("binary")
+        app._protocol_path.set("")
+        app._maybe_scan_motor()
+        assert "Pending protocol" in app._scan_motor_var.get()
+
+    def test_refresh_scans_dispatches_per_source(self, app):
+        # No paths set — refresh just clears all labels (or leaves empty).
+        app._refresh_scans(triggering_key="config")
+        assert app._scan_sensor_var.get() == ""
+        assert app._scan_psu_var.get() == ""
